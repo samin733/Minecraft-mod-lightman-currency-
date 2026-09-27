@@ -1,0 +1,72 @@
+package com.samin.villagercurrency.mixin;
+
+import com.samin.villagercurrency.LightmanCurrencyAdapter;
+import com.samin.villagercurrency.TradeConverter;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.item.trading.MerchantOffer;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
+
+/**
+ * Re-applies vanilla's dynamic emerald price calculation to a converted
+ * Lightman's denomination. Demand, price multiplier and specialPriceDiff are
+ * still read from the live MerchantOffer, so restocking, reputation, Hero of
+ * the Village and curing discounts continue to work.
+ */
+@Mixin(MerchantOffer.class)
+public abstract class MerchantOfferMixin {
+
+    @Inject(method = "getCostA", at = @At("RETURN"), cancellable = true)
+    private void villagercurrency$dynamicCurrencyCost(CallbackInfoReturnable<ItemStack> cir) {
+        ItemStack base = cir.getReturnValue();
+        if (base == null || base.isEmpty()) return;
+
+        CompoundTag tag = base.getTag();
+        if (tag == null || !tag.getBoolean(TradeConverter.MARKER)) return;
+
+        int originalEmeraldCount = tag.getInt(TradeConverter.ORIGINAL_EMERALD_COUNT);
+        if (originalEmeraldCount <= 0) return;
+
+        MerchantOffer self = (MerchantOffer) (Object) this;
+
+        // Recreate the vanilla price calculation using the original emerald
+        // base count, but copy the live uses/maxUses/demand/multiplier fields.
+        MerchantOffer vanilla = new MerchantOffer(
+                new ItemStack(Items.EMERALD, originalEmeraldCount),
+                self.getCostB(),
+                self.getResult(),
+                self.getUses(),
+                self.getMaxUses(),
+                self.getXp(),
+                self.getPriceMultiplier(),
+                self.getDemand()
+        );
+        vanilla.setSpecialPriceDiff(self.getSpecialPriceDiff());
+
+        ItemStack dynamicEmeraldCost = vanilla.getCostA();
+        if (dynamicEmeraldCost.isEmpty() || !dynamicEmeraldCost.is(Items.EMERALD)) return;
+
+        long value = Math.multiplyExact(
+                dynamicEmeraldCost.getCount(),
+                LightmanCurrencyAdapter.emeraldCoinValue()
+        );
+
+        ItemStack coins = LightmanCurrencyAdapter.stackForValueUsing(base, value);
+
+        // Exact-only safety: never round down. If the selected denomination
+        // cannot represent the current price in <=64 items, retain the
+        // original vanilla price rather than creating a cheaper trade.
+        if (!coins.isEmpty()) {
+            CompoundTag marker = coins.getOrCreateTag();
+            marker.putBoolean(TradeConverter.MARKER, true);
+            marker.putInt(TradeConverter.ORIGINAL_EMERALD_COUNT, originalEmeraldCount);
+            cir.setReturnValue(coins);
+        } else {
+            cir.setReturnValue(dynamicEmeraldCost);
+        }
+    }
+}

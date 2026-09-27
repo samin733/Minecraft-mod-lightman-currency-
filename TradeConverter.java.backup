@@ -1,0 +1,101 @@
+package com.samin.villagercurrency;
+
+import io.github.lightman314.lightmanscurrency.api.money.coins.data.coin.CoinEntry;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.item.trading.MerchantOffer;
+
+import java.util.Random;
+
+/**
+ * Converts the contents of a MerchantOffer without replacing its vanilla
+ * economic state. A converted first cost is marked so MerchantOfferMixin can
+ * reconstruct the current dynamic emerald price on every getCostA() call.
+ */
+public final class TradeConverter {
+    public static final String MARKER = "VillagerCurrencyDynamicCost";
+    public static final String ORIGINAL_EMERALD_COUNT = "OriginalEmeraldCount";
+
+    private TradeConverter() {}
+
+    public static MerchantOffer convertOffer(MerchantOffer offer, int villagerLevel, Random random) {
+        ItemStack base = offer.getBaseCostA();
+        ItemStack costB = offer.getCostB();
+        ItemStack result = offer.getResult();
+
+        ItemStack newBase = base.copy();
+        ItemStack newB = costB.copy();
+        ItemStack newResult = result.copy();
+
+        if (base.is(Items.EMERALD)) {
+            long value = Math.multiplyExact(base.getCount(), LightmanCurrencyAdapter.emeraldCoinValue());
+            ItemStack denomination = chooseDynamicDenomination(value, villagerLevel, random);
+
+            if (!denomination.isEmpty()) {
+                CompoundTag tag = denomination.getOrCreateTag();
+                tag.putBoolean(MARKER, true);
+                tag.putInt(ORIGINAL_EMERALD_COUNT, base.getCount());
+                newBase = denomination;
+            }
+        }
+
+        if (!costB.isEmpty() && costB.is(Items.EMERALD)) {
+            long value = Math.multiplyExact(costB.getCount(), LightmanCurrencyAdapter.emeraldCoinValue());
+            ItemStack converted = LightmanCurrencyAdapter.makeExact(value, villagerLevel, random);
+            if (!converted.isEmpty()) newB = converted;
+        }
+
+        if (result.is(Items.EMERALD)) {
+            long value = Math.multiplyExact(result.getCount(), LightmanCurrencyAdapter.emeraldCoinValue());
+            ItemStack converted = LightmanCurrencyAdapter.makeExact(value, villagerLevel, random);
+            if (!converted.isEmpty()) newResult = converted;
+        }
+
+        if (ItemStack.matches(newBase, base) && ItemStack.matches(newB, costB)
+                && ItemStack.matches(newResult, result)) {
+            return offer;
+        }
+
+        return rebuild(offer, newBase, newB, newResult);
+    }
+
+    private static ItemStack chooseDynamicDenomination(long baseValue, int villagerLevel, Random random) {
+        var candidates = LightmanCurrencyAdapter.exactCandidates(baseValue);
+        if (candidates.isEmpty()) return ItemStack.EMPTY;
+
+        int target = Math.max(1, Math.min(6, villagerLevel));
+        var preferred = candidates.stream()
+                .filter(e -> LightmanCurrencyAdapter.tierFor(
+                        net.minecraftforge.registries.ForgeRegistries.ITEMS.getKey(e.getCoin())) >= target)
+                .toList();
+
+        var pool = preferred.isEmpty() ? candidates : preferred;
+        CoinEntry selected = pool.get(random.nextInt(pool.size()));
+
+        // The base stack only establishes the item identity. The mixin supplies
+        // the dynamically calculated count, so this must be a valid one-stack
+        // representation of the original base price.
+        return LightmanCurrencyAdapter.stackForValue(baseValue, selected);
+    }
+
+    /**
+     * MerchantOffer has no demand setter. Its public CompoundTag constructor
+     * is the clean 1.20.1 way to preserve uses, maxUses, rewardExp, demand,
+     * specialPriceDiff, multiplier and XP exactly.
+     */
+    private static MerchantOffer rebuild(MerchantOffer source, ItemStack base, ItemStack costB, ItemStack result) {
+        CompoundTag tag = source.createTag();
+        base.save(tagFor(tag, "buy"));
+        costB.save(tagFor(tag, "buyB"));
+        result.save(tagFor(tag, "sell"));
+        return new MerchantOffer(tag);
+    }
+
+    private static CompoundTag tagFor(CompoundTag parent, String key) {
+        // createTag writes the three ItemStacks under these keys in 1.20.1.
+        CompoundTag stackTag = parent.getCompound(key);
+        parent.put(key, stackTag);
+        return stackTag;
+    }
+}
